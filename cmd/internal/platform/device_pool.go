@@ -291,6 +291,17 @@ func (p *DevicePool) GarbageCollect(ctx context.Context) {
 		}
 
 		if now.Sub(meta.LastUsed) > gcMaxAge {
+			// Hold the device's lock while deleting it, so a device in use by
+			// another process (or by a single session in this one) is left alone.
+			if err := p.locks.Lock(d.UDID); err != nil {
+				slog.Debug("Skipping GC of locked device", "udid", d.UDID, "err", err)
+				continue
+			}
+			// The device may have been used and released since the first read.
+			if meta, err = p.readMetaFile(d.UDID); err != nil || now.Sub(meta.LastUsed) <= gcMaxAge {
+				p.locks.Unlock(d.UDID)
+				continue
+			}
 			slog.Info("Garbage collecting expired device", "udid", d.UDID, "name", d.Name, "lastUsed", meta.LastUsed)
 			delCtx, delCancel := context.WithTimeout(ctx, simctlTimeout)
 			if err := p.simctl.Delete(delCtx, d.UDID, p.deviceSetPath); err != nil {
@@ -313,7 +324,10 @@ func (p *DevicePool) GarbageCollect(ctx context.Context) {
 			if err := os.Remove(filepath.Join(p.deviceSetPath, d.UDID+".meta.json")); err != nil && !os.IsNotExist(err) {
 				slog.Debug("Failed to remove meta file during GC", "udid", d.UDID, "err", err)
 			}
+			// Removed while the flock is still held. A process that opened the
+			// file before this can only lock it for a device that no longer exists.
 			p.locks.remove(d.UDID)
+			p.locks.Unlock(d.UDID)
 		}
 	}
 }
