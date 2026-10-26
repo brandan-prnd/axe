@@ -56,7 +56,7 @@ func TestDeviceLocks_Lock_AlreadyHeld(t *testing.T) {
 	}
 }
 
-func TestDeviceLocks_Unlock_RemovesLockFile(t *testing.T) {
+func TestDeviceLocks_Unlock_KeepsLockFile(t *testing.T) {
 	setPath := t.TempDir()
 	locks := NewDeviceLocks(setPath)
 
@@ -65,14 +65,42 @@ func TestDeviceLocks_Unlock_RemovesLockFile(t *testing.T) {
 	}
 	locks.Unlock("RELEASED-1")
 
-	if _, err := os.Stat(filepath.Join(setPath, "RELEASED-1.lock")); !os.IsNotExist(err) {
-		t.Errorf("expected lock file to be removed after Unlock, stat err: %v", err)
+	if _, err := os.Stat(filepath.Join(setPath, "RELEASED-1.lock")); err != nil {
+		t.Errorf("expected lock file to remain after Unlock, stat err: %v", err)
 	}
 	if locks.IsHeld("RELEASED-1") {
 		t.Error("IsHeld: expected false after Unlock")
 	}
 	if err := locks.Lock("RELEASED-1"); err != nil {
 		t.Errorf("Lock: expected to re-acquire the lock after Unlock: %v", err)
+	}
+}
+
+func TestDeviceLocks_Unlock_NoDoubleLockAcrossUnlock(t *testing.T) {
+	// A contender opens the lock file while it is held and waits. After
+	// Unlock, the contender locks that file; a new Lock for the same UDID
+	// must then see it as held rather than lock a recreated file.
+	setPath := t.TempDir()
+	locks := NewDeviceLocks(setPath)
+	if err := locks.Lock("RACE-1"); err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	contender, err := os.OpenFile(filepath.Join(setPath, "RACE-1.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("opening lock file: %v", err)
+	}
+	defer func() { _ = contender.Close() }()
+
+	locks.Unlock("RACE-1")
+
+	if err := syscall.Flock(int(contender.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("contender flock: %v", err)
+	}
+	defer func() { _ = syscall.Flock(int(contender.Fd()), syscall.LOCK_UN) }()
+
+	if err := NewDeviceLocks(setPath).Lock("RACE-1"); err == nil {
+		t.Error("Lock: expected an error while the contender holds the device")
 	}
 }
 

@@ -62,7 +62,10 @@ func (l *DeviceLocks) Lock(udid string) error {
 	return nil
 }
 
-// Unlock releases the flock taken by Lock and removes the lock file.
+// Unlock releases the flock taken by Lock. The lock file stays on disk: if it
+// were unlinked, a process that already opened the old file could lock that
+// inode while another locks a newly created file for the same UDID. The file
+// is removed only when the device itself is deleted.
 func (l *DeviceLocks) Unlock(udid string) {
 	if l.isXcodeDeviceSet() {
 		return
@@ -78,7 +81,6 @@ func (l *DeviceLocks) Unlock(udid string) {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
 	}
-	l.remove(udid)
 }
 
 // IsHeld reports whether some process currently holds the device's lock.
